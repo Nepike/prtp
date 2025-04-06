@@ -1,0 +1,7 @@
+Metadata-Version: 2.1
+Name: slam-esp32
+Version: 0.0.1
+Summary: ESP32 SLAM package
+Maintainer: your_name
+Maintainer-email: your_email@example.com
+License: Apache-2.0

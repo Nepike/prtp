@@ -1,17 +1,26 @@
- 
 controller_server:
   ros__parameters:
     controller_frequency: 10.0
-    min_x_velocity_threshold: 0.001
-    min_y_velocity_threshold: 0.001
-    min_theta_velocity_threshold: 0.001
-    max_vel_x: 0.5
-    max_rotational_vel: 1.0
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["goal_checker"]
+    controller_plugins: ["FollowPath"]
 
 planner_server:
   ros__parameters:
-    expected_planner_frequency: 5.0
+    planner_plugins: ["GridBased"]
 
-behavior_server:
+costmap_common:
   ros__parameters:
-    behavior_plugins: ["spin", "backup", "assisted_teleop"]
+    inflation_radius: 0.5
+    obstacle_range: 2.5
+    raytrace_range: 3.0
+
+local_costmap:
+  ros__parameters:
+    global_frame: "odom"
+    robot_base_frame: "base_link"
+
+global_costmap:
+  ros__parameters:
+    global_frame: "map"
+    robot_base_frame: "base_link"

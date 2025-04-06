@@ -1,7 +1,10 @@
 slam_toolbox:
   ros__parameters:
-    mode: mapping
-    odom_frame: odom
-    map_frame: map
-    base_frame: base_link
-    scan_topic: /scan
+    mode: "mapping"
+    base_frame: "base_link"
+    map_frame: "map"
+    odom_frame: "odom"
+    scan_topic: "/scan"
+    use_laser_scan: true
+    use_odom: true
+    max_laser_range: 12.0

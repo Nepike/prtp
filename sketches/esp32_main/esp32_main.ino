@@ -1,11 +1,14 @@
 #include <WiFi.h>
 #include <AsyncUDP.h>
+#include <RPLidar.h>
 
 // Конфигурация сети
 const char* ssid = "Nopike";
 const char* password = "11111111";
 const int udpPort = 1234;
 AsyncUDP udp;
+RPLidar lidar;
+const int lidarPort = 1235;
 
 // Определение пинов
 #define LEFT_MOTOR_A 25     
@@ -60,6 +63,24 @@ long rightBase = 0;
 // Прерывания энкодеров
 void left_interrupt() { digitalRead(LEFT_ENCODER_B) ? left_encoder_value++ : left_encoder_value--; }
 void right_interrupt() { digitalRead(RIGHT_ENCODER_B) ? right_encoder_value++ : right_encoder_value--; }
+
+void sendLidarData() {
+  static uint32_t lastLidarSend = 0;
+  if(millis() - lastLidarSend >= 100) {
+    String lidarData;
+    lidarData.reserve(2048);
+
+    lidarData += "LIDAR ";
+    while(lidar.waitPoint()) {
+      float distance = lidar.getCurrentPoint().distance;
+      float angle = lidar.getCurrentPoint().angle;
+      lidarData += String(angle,2) + "," + String(distance,2) + ";";
+    }
+
+    udp.broadcastTo(lidarData.c_str(), lidarPort);
+    lastLidarSend = millis();
+  }
+}
 
 void updateOdometry() {
   long deltaLeft = left_encoder_value - last_left_encoder;
@@ -212,6 +233,10 @@ void connectToWiFi() {
 
 void setup() {
   Serial.begin(115200);
+
+  Serial1.begin(115200, SERIAL_8N1, 21, 22); // RX на пине 21
+  lidar.begin(Serial1);
+
   pinMode(LEFT_MOTOR_A, OUTPUT);
   pinMode(LEFT_MOTOR_B, OUTPUT);
   pinMode(RIGHT_MOTOR_A, OUTPUT);
@@ -239,15 +264,18 @@ void loop() {
   if(now - tPID >= 50) {
     computeSpeed();
     updateOdometry();
+    sendLidarData();
     computeWheelsPID();
     tPID = now;
   }
 
   if(now - tStatus >= 200) {
-    String status = "{\"x\":" + String(xPos, 3) + 
-                    ",\"y\":" + String(yPos, 3) + 
-                    ",\"theta\":" + String(theta, 3) + 
-                    "}";
+    String status = "{\"x\":" + String(xPos/1000.0, 3) +   // мм в метры
+               ",\"y\":" + String(yPos/1000.0, 3) +
+               ",\"theta\":" + String(theta, 3) +
+               ",\"vx\":" + String(vlSpeedFiltered/1000.0, 3) +
+               ",\"vyaw\":" + String((vrSpeedFiltered - vlSpeedFiltered)/WHEEL_BASE, 3) +
+               "}";
     udp.broadcast(status.c_str());
     tStatus = now;
   }
