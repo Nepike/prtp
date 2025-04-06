@@ -3,6 +3,7 @@ setup.cfg
 setup.py
 config/nav2_params.yaml
 config/slam_config.yaml
+launch/slam_esp32.launch.py
 resource/slam_esp32
 slam_esp32/__init__.py
 slam_esp32/lidar_bridge.py

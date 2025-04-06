@@ -2,281 +2,161 @@
 #include <AsyncUDP.h>
 #include <RPLidar.h>
 
-// Конфигурация сети
+// ========== CONFIG SECTION ========== //
 const char* ssid = "Nopike";
 const char* password = "11111111";
-const int udpPort = 1234;
+const IPAddress laptopIP(192, 168, 1, 100);  // Укажите IP вашего ноутбука
+const int udpOdomPort = 1234;                // Порт для одометрии
+const int udpLidarPort = 1235;               // Порт для лидара
+// ==================================== //
+
+// Hardware Pins
+#define MOTOR_LEFT_A 25
+#define MOTOR_LEFT_B 26
+#define MOTOR_RIGHT_A 13
+#define MOTOR_RIGHT_B 14
+#define ENCODER_LEFT_A 35
+#define ENCODER_LEFT_B 34
+#define ENCODER_RIGHT_A 32
+#define ENCODER_RIGHT_B 33
+
+// Globals
 AsyncUDP udp;
 RPLidar lidar;
-const int lidarPort = 1235;
-
-// Определение пинов
-#define LEFT_MOTOR_A 25     
-#define LEFT_MOTOR_B 26     
-#define RIGHT_MOTOR_A 13    
-#define RIGHT_MOTOR_B 14    
-#define LEFT_ENCODER_A 35    
-#define LEFT_ENCODER_B 34    
-#define RIGHT_ENCODER_A 32   
-#define RIGHT_ENCODER_B 33    
-
-// Энкодеры и управление
-volatile long left_encoder_value = 0;
-volatile long right_encoder_value = 0;
-long last_left_encoder = 0;
-long last_right_encoder = 0;
-long last_speed_left_encoder = 0, last_speed_right_encoder = 0;
-
-// Фильтрация скорости
-float vlSpeedFiltered = 0.0, vrSpeedFiltered = 0.0;
-uint32_t lastTimeL = 0, lastTimeR = 0;
-
-// Целевые скорости
-float targetLeftWheelSpeed = 0, targetRightWheelSpeed = 0;
-
-// Одометрия
+volatile long leftEncoder = 0;
+volatile long rightEncoder = 0;
 float xPos = 0.0, yPos = 0.0, theta = 0.0;
 
-// Константы
-const float WHEEL_DIAMETER = 69.0;
-const float WHEEL_BASE = 250.0;
-const float ENCODER_RESOLUTION = 330.0;
-const float TICKS_TO_MM = (PI * WHEEL_DIAMETER) / ENCODER_RESOLUTION;
-const float ALPHA = 0.5;
-
-// PID параметры
-float pidKp = 1.1;
-float pidKi = 1.3;
-float pidKd = 0.01;
-float pidKff = 0.25;
-float errorLeftIntegral = 0;
-float errorRightIntegral = 0;
-float prevErrorLeft = 0;
-float prevErrorRight = 0;
-uint32_t lastPIDTime = 0;
-
-// Компенсация движения
-bool goingStraight = false;
-long leftBase = 0;
-long rightBase = 0;
-
-// Прерывания энкодеров
-void left_interrupt() { digitalRead(LEFT_ENCODER_B) ? left_encoder_value++ : left_encoder_value--; }
-void right_interrupt() { digitalRead(RIGHT_ENCODER_B) ? right_encoder_value++ : right_encoder_value--; }
-
-void sendLidarData() {
-  static uint32_t lastLidarSend = 0;
-  if(millis() - lastLidarSend >= 100) {
-    String lidarData;
-    lidarData.reserve(2048);
-
-    lidarData += "LIDAR ";
-    while(lidar.waitPoint()) {
-      float distance = lidar.getCurrentPoint().distance;
-      float angle = lidar.getCurrentPoint().angle;
-      lidarData += String(angle,2) + "," + String(distance,2) + ";";
-    }
-
-    udp.broadcastTo(lidarData.c_str(), lidarPort);
-    lastLidarSend = millis();
-  }
+// ========== ENCODER INTERRUPTS ========== //
+void IRAM_ATTR leftEncoderISR() {
+  digitalRead(ENCODER_LEFT_B) ? leftEncoder++ : leftEncoder--;
 }
 
-void updateOdometry() {
-  long deltaLeft = left_encoder_value - last_left_encoder;
-  long deltaRight = right_encoder_value - last_right_encoder;
-  last_left_encoder = left_encoder_value;
-  last_right_encoder = right_encoder_value;
-
-  float distLeft = deltaLeft * TICKS_TO_MM;
-  float distRight = deltaRight * TICKS_TO_MM;
-  float deltaS = (distLeft + distRight)/2.0;
-  float deltaTheta = (distRight - distLeft)/WHEEL_BASE;
-
-  theta += deltaTheta;
-  xPos += deltaS * cos(theta);
-  yPos += deltaS * sin(theta);
+void IRAM_ATTR rightEncoderISR() {
+  digitalRead(ENCODER_RIGHT_B) ? rightEncoder++ : rightEncoder--;
 }
 
-void computeSpeed() {
-  uint32_t now = micros();
-  if(lastTimeL == 0 || lastTimeR == 0) { 
-    lastTimeL = lastTimeR = now;
-    last_speed_left_encoder = left_encoder_value;
-    last_speed_right_encoder = right_encoder_value;
-    return;
-  }
+// ========== WIFI CONNECTION ========== //
+void connectWiFi() {
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
 
-  float dtL = (now - lastTimeL) * 1e-6f;
-  float dtR = (now - lastTimeR) * 1e-6f;
-
-  if(dtL > 0 && left_encoder_value != last_speed_left_encoder) {
-    long deltaLeft = left_encoder_value - last_speed_left_encoder;
-    float vlSpeed = ((float)deltaLeft/ENCODER_RESOLUTION)*(PI*WHEEL_DIAMETER)/dtL;
-    vlSpeedFiltered = ALPHA*vlSpeed + (1.0f-ALPHA)*vlSpeedFiltered;
-    last_speed_left_encoder = left_encoder_value;
-    lastTimeL = now;
-  } else if(dtL > 0.005) vlSpeedFiltered = 0;
-
-  if(dtR > 0 && right_encoder_value != last_speed_right_encoder) {
-    long deltaRight = right_encoder_value - last_speed_right_encoder;
-    float vrSpeed = ((float)deltaRight/ENCODER_RESOLUTION)*(PI*WHEEL_DIAMETER)/dtR;
-    vrSpeedFiltered = ALPHA*vrSpeed + (1.0f-ALPHA)*vrSpeedFiltered;
-    last_speed_right_encoder = right_encoder_value;
-    lastTimeR = now;
-  } else if(dtR > 0.005) vrSpeedFiltered = 0;
-}
-
-void resetPID() {
-  errorLeftIntegral = errorRightIntegral = 0;
-  prevErrorLeft = prevErrorRight = 0;
-  vlSpeedFiltered = vrSpeedFiltered = 0;
-  lastPIDTime = millis();
-}
-
-void computeWheelsPID() {
-  const float integralLimit = 30.0;
-  static float lastTargetLeft = 0.0, lastTargetRight = 0.0;
-
-  if(targetLeftWheelSpeed != lastTargetLeft || 
-     targetRightWheelSpeed != lastTargetRight ||
-     (targetLeftWheelSpeed == 0 && targetRightWheelSpeed == 0)) resetPID();
-
-  lastTargetLeft = targetLeftWheelSpeed;
-  lastTargetRight = targetRightWheelSpeed;
-
-  uint32_t now = millis();
-  float dt = (now - lastPIDTime)/1000.0f;
-  if(dt < 0.001f) dt = 0.001f;
-  lastPIDTime = now;
-
-  float errorLeft = targetLeftWheelSpeed - vlSpeedFiltered;
-  float errorRight = targetRightWheelSpeed - vrSpeedFiltered;
-
-  errorLeftIntegral = constrain(errorLeftIntegral + errorLeft*dt, -integralLimit, integralLimit);
-  errorRightIntegral = constrain(errorRightIntegral + errorRight*dt, -integralLimit, integralLimit);
-
-  float derivativeLeft = (errorLeft - prevErrorLeft)/dt;
-  float derivativeRight = (errorRight - prevErrorRight)/dt;
-  prevErrorLeft = errorLeft;
-  prevErrorRight = errorRight;
-
-  float outputLeft = pidKp*errorLeft + pidKi*errorLeftIntegral + pidKd*derivativeLeft + pidKff*targetLeftWheelSpeed;
-  float outputRight = pidKp*errorRight + pidKi*errorRightIntegral + pidKd*derivativeRight + pidKff*targetRightWheelSpeed;
-
-  if(goingStraight && fabs(targetLeftWheelSpeed) > 1.0 && fabs(targetRightWheelSpeed) > 1.0) {
-    long diff = (left_encoder_value - leftBase) - (right_encoder_value - rightBase);
-    float corr = 3.0f * diff;
-    outputLeft -= corr*0.5f;
-    outputRight += corr*0.5f;
-  }
-
-  int leftA = constrain(outputLeft >=0 ? 0 : (int)-outputLeft, 0, 255);
-  int leftB = constrain(outputLeft >=0 ? (int)outputLeft : 0, 0, 255);
-  int rightA = constrain(outputRight >=0 ? 0 : (int)-outputRight, 0, 255);
-  int rightB = constrain(outputRight >=0 ? (int)outputRight : 0, 0, 255);
-
-  analogWrite(LEFT_MOTOR_A, leftA);
-  analogWrite(LEFT_MOTOR_B, leftB);
-  analogWrite(RIGHT_MOTOR_A, rightA);
-  analogWrite(RIGHT_MOTOR_B, rightB);
-}
-
-void setRobotVelocity(float linearVelocity, float angularVelocity) {
-  if(fabs(linearVelocity) < 10 && fabs(angularVelocity) < 0.1) {
-    targetLeftWheelSpeed = targetRightWheelSpeed = 0;
-    resetPID();
-    goingStraight = false;
-    return;
-  }
-
-  goingStraight = (fabs(angularVelocity) < 0.0001f);
-  if(goingStraight) {
-    leftBase = left_encoder_value;
-    rightBase = right_encoder_value;
-  }
-
-  targetLeftWheelSpeed = linearVelocity - angularVelocity*WHEEL_BASE/2.0;
-  targetRightWheelSpeed = linearVelocity + angularVelocity*WHEEL_BASE/2.0;
-}
-
-void processCommand(String command) {
-  command.trim();
-  
-  if(command.startsWith("SET_PWM")) {
-    int vals[4];
-    if(sscanf(command.c_str(), "SET_PWM %d %d %d %d", &vals[0], &vals[1], &vals[2], &vals[3]) == 4) {
-      analogWrite(LEFT_MOTOR_A, constrain(vals[0], 0, 255));
-      analogWrite(LEFT_MOTOR_B, constrain(vals[1], 0, 255));
-      analogWrite(RIGHT_MOTOR_A, constrain(vals[2], 0, 255));
-      analogWrite(RIGHT_MOTOR_B, constrain(vals[3], 0, 255));
-    }
-  }
-  else if(command.startsWith("SET_ROBOT_VELOCITY")) {
-    float lin, ang;
-    if(sscanf(command.c_str(), "SET_ROBOT_VELOCITY %f %f", &lin, &ang) == 2) {
-      setRobotVelocity(lin, ang);
-    }
-  }
-  else if(command.startsWith("SET_COEFF")) {
-    float kp, ki, kd, kff;
-    if(sscanf(command.c_str(), "SET_COEFF %f %f %f %f", &kp, &ki, &kd, &kff) == 4) {
-      pidKp = kp; pidKi = ki; pidKd = kd; pidKff = kff;
-    }
-  }
-}
-
-void connectToWiFi() {
   WiFi.begin(ssid, password);
-  while(WiFi.status() != WL_CONNECTED) delay(500);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nWiFi connected!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
 }
 
+// ========== LIDAR HANDLING ========== //
+void processLidar() {
+  if (IS_OK(lidar.waitPoint())) {
+    String lidarData;
+    lidarData.reserve(1024);
+
+    size_t count = lidar.getScanData().size();
+    lidarData = String(count) + ";";
+
+    for (size_t pos = 0; pos < count; pos++) {
+      float angle = lidar.getScanData()[pos].angle;
+      float distance = lidar.getScanData()[pos].distance;
+      lidarData += String(angle, 2) + "," + String(distance, 2) + ";";
+    }
+
+    udp.broadcastTo(lidarData.c_str(), udpLidarPort);
+  } else {
+    lidar.startScan();
+    Serial.println("Lidar scan restarting...");
+  }
+}
+
+// ========== ODOMETRY CALCULATION ========== //
+void updateOdometry() {
+  static long lastLeft = 0, lastRight = 0;
+  const float WHEEL_DIAMETER = 0.069;    // meters
+  const float WHEEL_BASE = 0.25;         // meters
+  const float TICKS_PER_REV = 330.0;
+  const float MM_PER_TICK = (PI * WHEEL_DIAMETER) / TICKS_PER_REV;
+
+  long deltaLeft = leftEncoder - lastLeft;
+  long deltaRight = rightEncoder - lastRight;
+  lastLeft = leftEncoder;
+  lastRight = rightEncoder;
+
+  float distLeft = deltaLeft * MM_PER_TICK / 1000.0;  // meters
+  float distRight = deltaRight * MM_PER_TICK / 1000.0; // meters
+
+  theta += (distRight - distLeft) / WHEEL_BASE;
+  xPos += (distLeft + distRight) / 2.0 * cos(theta);
+  yPos += (distLeft + distRight) / 2.0 * sin(theta);
+}
+
+// ========== MAIN SETUP ========== //
 void setup() {
   Serial.begin(115200);
-
-  Serial1.begin(115200, SERIAL_8N1, 21, 22); // RX на пине 21
+  Serial1.begin(115200, SERIAL_8N1, 21, 22); // Лидар на пинах 21(RX), 22(TX)
   lidar.begin(Serial1);
 
-  pinMode(LEFT_MOTOR_A, OUTPUT);
-  pinMode(LEFT_MOTOR_B, OUTPUT);
-  pinMode(RIGHT_MOTOR_A, OUTPUT);
-  pinMode(RIGHT_MOTOR_B, OUTPUT);
-  pinMode(LEFT_ENCODER_A, INPUT);
-  pinMode(LEFT_ENCODER_B, INPUT);
-  pinMode(RIGHT_ENCODER_A, INPUT);
-  pinMode(RIGHT_ENCODER_B, INPUT);
-  
-  attachInterrupt(digitalPinToInterrupt(LEFT_ENCODER_A), left_interrupt, RISING);
-  attachInterrupt(digitalPinToInterrupt(RIGHT_ENCODER_A), right_interrupt, RISING);
+  // Настройка пинов
+  pinMode(MOTOR_LEFT_A, OUTPUT);
+  pinMode(MOTOR_LEFT_B, OUTPUT);
+  pinMode(MOTOR_RIGHT_A, OUTPUT);
+  pinMode(MOTOR_RIGHT_B, OUTPUT);
 
-  connectToWiFi();
-  udp.listen(udpPort);
-  udp.onPacket([](AsyncUDPPacket packet) {
-    processCommand(String((char*)packet.data()));
-    packet.printf("OK");
-  });
+  pinMode(ENCODER_LEFT_A, INPUT_PULLUP);
+  pinMode(ENCODER_LEFT_B, INPUT_PULLUP);
+  pinMode(ENCODER_RIGHT_A, INPUT_PULLUP);
+  pinMode(ENCODER_RIGHT_B, INPUT_PULLUP);
+
+  // Прерывания энкодеров
+  attachInterrupt(digitalPinToInterrupt(ENCODER_LEFT_A), leftEncoderISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_RIGHT_A), rightEncoderISR, RISING);
+
+  connectWiFi();
+
+  // Настройка UDP
+  if (!udp.listen(udpOdomPort)) {
+    Serial.println("UDP listen failed!");
+    while(1) delay(1000);
+  }
 }
 
+// ========== MAIN LOOP ========== //
 void loop() {
-  static uint32_t tPID = 0, tStatus = 0;
-  uint32_t now = millis();
+  static uint32_t lastOdomTime = 0;
+  static uint32_t lastLidarTime = 0;
 
-  if(now - tPID >= 50) {
-    computeSpeed();
-    updateOdometry();
-    sendLidarData();
-    computeWheelsPID();
-    tPID = now;
+  // Отправка одометрии каждые 100ms
+  if (millis() - lastOdomTime >= 100) {
+    String odomJSON;
+    odomJSON.reserve(256);
+    odomJSON = "{\"x\":" + String(xPos, 3) +
+               ",\"y\":" + String(yPos, 3) +
+               ",\"theta\":" + String(theta, 3) + "}";
+
+    udp.broadcastTo(odomJSON.c_str(), udpOdomPort);
+    lastOdomTime = millis();
   }
 
-  if(now - tStatus >= 200) {
-    String status = "{\"x\":" + String(xPos/1000.0, 3) +   // мм в метры
-               ",\"y\":" + String(yPos/1000.0, 3) +
-               ",\"theta\":" + String(theta, 3) +
-               ",\"vx\":" + String(vlSpeedFiltered/1000.0, 3) +
-               ",\"vyaw\":" + String((vrSpeedFiltered - vlSpeedFiltered)/WHEEL_BASE, 3) +
-               "}";
-    udp.broadcast(status.c_str());
-    tStatus = now;
+  // Отправка данных лидара каждые 50ms
+  if (millis() - lastLidarTime >= 50) {
+    processLidar();
+    lastLidarTime = millis();
   }
+
+  // Проверка подключения WiFi
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi disconnected! Reconnecting...");
+    connectWiFi();
+  }
+
+  // Обновление одометрии
+  updateOdometry();
+
+  delay(1);
 }
